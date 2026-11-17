@@ -1,4 +1,4 @@
-// cards — Klondike solitaire in four card series.
+// cards — Klondike and Spider solitaire in four card series.
 
 #include <QElapsedTimer>
 #include <QGuiApplication>
@@ -22,7 +22,7 @@
 int main(int argc, char *argv[]) {
     const std::string command = argc > 1 ? argv[1] : "open";
     if (command == "--help") {
-      std::cout << "Cards — Klondike solitaire\nUsage: cards [open | inspect | deal [SEED] | --help]\nHeadless commands accept --json. inspect prints the saved game; deal prints a fresh one.\n";
+      std::cout << "Cards — Klondike and Spider solitaire\nUsage: cards [open | inspect | deal [GAME [SEED]] | --help]\nHeadless commands accept --json. inspect prints the saved game; deal prints a fresh one, --suits N for spider.\n";
       return 0;
     }
     if (command == "inspect" || command == "deal") return runCli(argc, argv);

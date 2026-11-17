@@ -96,7 +96,7 @@ ApplicationWindow {
     { keys: ["Q"], text: qsTr("Quit (your game is saved)") }
   ]
   // Single keys wait while the shortcuts are up or cards are in the hand.
-  property bool busy: helpDialog.visible || table.dragging
+  property bool busy: helpDialog.visible || newGameDialog.visible || table.dragging
   // The clock stops while another window is in front.
   onActiveChanged: backend.active = active
   Component.onCompleted: backend.active = active
@@ -120,7 +120,8 @@ ApplicationWindow {
     background: Rectangle {
       radius: theme.radius
       color: control.down ? Qt.alpha(window.tint,.26) : control.lit ? Qt.alpha(window.tint,control.hovered ? .22 : .13) : control.hovered ? Qt.alpha(theme.foreground,.09) : "transparent"
-      border.color: control.lit ? Qt.alpha(window.tint,.5) : window.line
+      // A button that takes the keyboard shows where the arrows rest.
+      border.color: control.lit || control.activeFocus ? Qt.alpha(window.tint,.5) : window.line
     }
     contentItem: Text {
       text: control.text
@@ -248,7 +249,7 @@ ApplicationWindow {
         color: theme.background
         Rectangle { anchors { left: parent.left; right: parent.right; top: parent.top } height: 1; color: window.line }
         // The top edge fills in as the cards go home.
-        Rectangle { anchors { left: parent.left; top: parent.top } height: 2; width: parent.width * backend.home / 52; color: window.tint }
+        Rectangle { anchors { left: parent.left; top: parent.top } height: 2; width: parent.width * backend.home / backend.cardsTotal; color: window.tint }
         // The name is also the way to the shortcuts.
         RowLayout {
           anchors { left: parent.left; leftMargin: 12; verticalCenter: parent.verticalCenter }
@@ -372,7 +373,7 @@ ApplicationWindow {
           }
           FooterIcon { objectName: "undoButton"; name: qsTr("Undo"); key: "Ctrl+Z"; path: "M8 5L3.5 9.5L8 14M3.5 9.5H14a5 5 0 0 1 0 10h-3"; enabled: backend.canUndo; onClicked: backend.undo() }
           FooterIcon { objectName: "hintButton"; name: qsTr("Hint"); key: "H"; path: "M9 17.5h6M10 20.5h4M8.5 14a6 6 0 1 1 7 0c-.6.5-.9 1.1-1 2h-5c-.1-.9-.4-1.5-1-2Z"; enabled: !backend.won; onClicked: backend.hint() }
-          FooterIcon { objectName: "newGameButton"; name: qsTr("New game"); key: "N"; path: "M12 5v14M5 12h14"; lit: true; Layout.leftMargin: 4; Layout.rightMargin: 4; onClicked: backend.newGame() }
+          FooterIcon { objectName: "newGameButton"; name: qsTr("New game"); key: "N"; path: "M12 5v14M5 12h14"; lit: true; Layout.leftMargin: 4; Layout.rightMargin: 4; onClicked: newGameDialog.open() }
         }
       }
     }
@@ -463,9 +464,61 @@ ApplicationWindow {
       }
     }
   }
+  // The new-game prompt: one button per game and number of suits the backend
+  // deals, each starting a game from a fresh deal. The arrows walk the four
+  // choices round, and Enter deals the one they rest on, so the prompt is
+  // driven from the keyboard like the table is.
+  Dialog {
+    id: newGameDialog
+    objectName: "newGame"
+    anchors.centerIn: parent
+    width: 360
+    modal: true
+    focus: true
+    title: qsTr("Deal a new game")
+    readonly property var choices: [klondikeChoice, spider1Choice, spider2Choice, spider4Choice]
+    // The prompt opens with the game in play under the arrows, so Enter
+    // re-deals it, as Deal again does.
+    onOpened: choices[backend.mode === 0 ? 0 : backend.suits === 1 ? 1 : backend.suits === 2 ? 2 : 3].forceActiveFocus()
+    function stepTo(step) {
+      const at = choices.indexOf(window.activeFocusItem)
+      choices[(at + step + choices.length) % choices.length].forceActiveFocus()
+    }
+    footer: DialogButtonBox {
+      LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
+      LayoutMirroring.childrenInherit: true
+      Button { text: qsTr("Close"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole; Material.roundedScale: theme.radius }
+      onRejected: newGameDialog.close()
+    }
+    Material.roundedScale: theme.radius
+    background: Rectangle { color: theme.background; radius: theme.radius; border.color: Qt.alpha(theme.foreground,.22) }
+    contentItem: ColumnLayout {
+      LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
+      LayoutMirroring.childrenInherit: true
+      spacing: 0
+      // Any of the four arrows walks, so the hand does not have to be lifted
+      // to choose; backwards or forwards, the walk goes round and round.
+      Keys.onPressed: (event) => {
+        if (event.key !== Qt.Key_Up && event.key !== Qt.Key_Down && event.key !== Qt.Key_Left && event.key !== Qt.Key_Right) return
+        newGameDialog.stepTo(event.key === Qt.Key_Up || event.key === Qt.Key_Left ? -1 : 1)
+        event.accepted = true
+      }
+      Label {
+        text: qsTr("Pick a game to deal.")
+        color: window.muted
+        wrapMode: Text.WordWrap
+        Layout.fillWidth: true
+        Layout.bottomMargin: 14
+      }
+      FlatButton { id: klondikeChoice; objectName: "dealKlondike"; text: qsTr("Klondike"); focusPolicy: Qt.StrongFocus; Layout.fillWidth: true; onClicked: { newGameDialog.close(); backend.newGame(0, 0, 4) } }
+      FlatButton { id: spider1Choice; objectName: "dealSpider1"; text: qsTr("Spider, one suit"); focusPolicy: Qt.StrongFocus; Layout.fillWidth: true; onClicked: { newGameDialog.close(); backend.newGame(0, 1, 1) } }
+      FlatButton { id: spider2Choice; objectName: "dealSpider2"; text: qsTr("Spider, two suits"); focusPolicy: Qt.StrongFocus; Layout.fillWidth: true; onClicked: { newGameDialog.close(); backend.newGame(0, 1, 2) } }
+      FlatButton { id: spider4Choice; objectName: "dealSpider4"; text: qsTr("Spider, four suits"); focusPolicy: Qt.StrongFocus; Layout.fillWidth: true; onClicked: { newGameDialog.close(); backend.newGame(0, 1, 4) } }
+    }
+  }
   Shortcut { sequence: "?"; enabled: !window.busy; onActivated: helpDialog.open() }
   Shortcut { sequence: "Q"; enabled: !window.busy; onActivated: window.close() }
-  Shortcut { sequence: "N"; enabled: !window.busy; onActivated: backend.newGame() }
+  Shortcut { sequence: "N"; enabled: !window.busy; onActivated: newGameDialog.open() }
   Shortcut { sequences: [StandardKey.Undo]; enabled: !window.busy; onActivated: backend.undo() }
   Shortcut { sequence: "H"; enabled: !window.busy; onActivated: backend.hint() }
   Shortcut { sequence: "D"; enabled: !window.busy; onActivated: backend.draw() }

@@ -13,7 +13,9 @@ Item {
   property bool target: false
   property bool cursor: false
   property bool lifted: false
-  readonly property int suit: Math.floor(cardId / 13)
+  // The table says which suit a card is when its id doesn't name it, as in a
+  // one- or two-suit deal; on its own the id only guesses.
+  property int suit: Math.floor(cardId / 13)
   readonly property int rank: cardId % 13
   readonly property color ink: suit === 1 || suit === 2 ? look.red : look.black
   readonly property string label: ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"][rank]

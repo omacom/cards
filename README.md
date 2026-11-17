@@ -2,7 +2,7 @@
 
 ![Cards in the Baize series](share/screenshots/baize.png)
 
-Klondike solitaire for Omarchy, built with C++ and Qt Quick. Draw three, no limit on passes, in four card series.
+Klondike and Spider solitaire for Omarchy, built with C++ and Qt Quick. Klondike draws three with no limit on passes; Spider deals in one, two, or four suits. Both play in the four card series.
 
 | | |
 | --- | --- |
@@ -11,7 +11,11 @@ Klondike solitaire for Omarchy, built with C++ and Qt Quick. Draw three, no limi
 
 ## Play
 
+![A Spider deal in the Baize series](share/screenshots/baize-spider.png)
+
 Click a card, then where it goes, or drag it. A double click sends a card to the best place it can go. Once nothing is hidden and the stock is spent, the rest of the cards go home by themselves. The game saves after every move.
+
+**New game** asks which game to deal: Klondike, or Spider in one, two, or four suits. In Spider, suited runs in rank order move together, a row is dealt to every column at once (never onto an empty column), and a finished king-to-ace run in one suit leaves for a home of its own; eight of them win the game.
 
 | Key | Action |
 | --- | --- |
@@ -37,7 +41,7 @@ bin/test
 build/cards open
 ```
 
-`cards inspect` prints the saved game and `cards deal [SEED]` prints a fresh one, both without a display and with `--json` if asked.
+`cards inspect` prints the saved game and `cards deal [GAME [SEED]]` prints a fresh one — GAME is `klondike` or `spider`, with `--suits 1|2|4` for spider — both without a display and with `--json` if asked.
 
 ## License
 

@@ -1,21 +1,10 @@
 #pragma once
 
-#include <cstdint>
-#include <optional>
-#include <vector>
+#include "solitaire.h"
 
 // The rules of Klondike, with no Qt in them: thirteen piles of cards, the
 // moves between them, and enough history to take every one back.
 namespace Klondike {
-
-// Ids run 0 to 51: thirteen spades, hearts, diamonds, then clubs, ace first.
-struct Card {
-  int id = 0;
-  bool up = false;
-  int suit() const { return id / 13; }
-  int rank() const { return id % 13; }
-  bool red() const { return suit() == 1 || suit() == 2; }
-};
 
 // Pile numbers: the stock, the waste, a foundation per suit, seven columns.
 enum { Stock = 0, Waste = 1, Foundation = 2, Tableau = 6, Piles = 13 };
@@ -23,41 +12,42 @@ enum { Stock = 0, Waste = 1, Foundation = 2, Tableau = 6, Piles = 13 };
 // The stock turns three cards at a time, of which only the last can be played.
 enum { Draw = 3 };
 
-// `count` cards off the top of `from` onto `to`. A draw is Stock to Waste and
-// a recycle is Waste to Stock. `flip` records that the move turned the card
-// it uncovered, so undo can turn it back.
-struct Move {
-  int from = -1, to = -1, count = 0;
-  bool flip = false;
-  bool operator==(const Move &other) const { return from == other.from && to == other.to && count == other.count; }
-};
+using Card = Solitaire::Card;
+using Move = Solitaire::Move;
 
-class Game {
+class Game : public Solitaire::Game {
 public:
   explicit Game(std::uint32_t seed = 1);
 
-  std::uint32_t seed() const { return m_seed; }
-  const std::vector<Card> &pile(int index) const { return m_piles[index]; }
-  const std::vector<Move> &moves() const { return m_moves; }
+  std::uint32_t seed() const override { return m_seed; }
+  const std::vector<Card> &pile(int index) const override { return m_piles[index]; }
+  const std::vector<Move> &moves() const override { return m_moves; }
+
+  int kind() const override { return 0; }
+  int suits() const override { return 4; }
+  int wastePile() const override { return Waste; }
+  int tableauStart() const override { return Tableau; }
+  int pileCount() const override { return Piles; }
+  int cardsTotal() const override { return 52; }
 
   // Whether the cards from `index` to the top of `from` may go onto `to`.
-  bool canMove(int from, int index, int to) const;
-  std::vector<int> targets(int from, int index) const;
+  bool canMove(int from, int index, int to) const override;
+  std::vector<int> targets(int from, int index) const override;
   // Where a double click sends those cards: home if it can, else a column.
-  int bestTarget(int from, int index) const;
+  int bestTarget(int from, int index) const override;
 
-  bool play(int from, int to, int count);
+  bool play(int from, int to, int count) override;
   // Turns cards from the stock, or brings the waste back round when it is empty.
-  bool drawStock();
-  bool undo();
+  bool drawStock() override;
+  bool undo() override;
 
-  int home() const;
-  bool won() const { return home() == 52; }
+  int home() const override;
+  bool won() const override { return home() == 52; }
   // Nothing is hidden any more, so the rest can only go one way.
-  bool finishable() const;
-  bool finishStep();
+  bool finishable() const override;
+  bool finishStep() override;
   // The next move worth making, or nothing when there is none to be found.
-  std::optional<Move> hint() const;
+  std::optional<Move> hint() const override;
 
 private:
   // Whether a lone card has anywhere to go: its foundation or a column.

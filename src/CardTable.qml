@@ -1,8 +1,8 @@
 import QtQuick
 
-// The table: thirteen places for piles and the fifty-two cards that move
-// between them. The cards are the same items for the whole game, so a move
-// is a card gliding from one place to the next.
+// The table: the piles of the game in play and the cards that move between
+// them. The cards are the same items for the whole game, so a move is a card
+// gliding from one place to the next.
 Item {
   id: table
   property var look
@@ -11,8 +11,9 @@ Item {
   LayoutMirroring.enabled: false
   LayoutMirroring.childrenInherit: true
   // The keyboard's place on the table, shown only once the keyboard is used.
+  // It starts on the first column, which the game in play decides.
   property bool keyboard: false
-  property int cursorPile: 6
+  property int cursorPile: backend.tableauStart
   property int cursorIndex: 0
   // The run of cards being dragged, and how far from where it lay.
   property bool dragging: false
@@ -28,13 +29,18 @@ Item {
 
   readonly property real sideMargin: Math.max(18, width * .04)
   readonly property real topMargin: Math.max(18, Math.min(32, height * .04))
-  // As wide as seven columns allow, and no taller than leaves room for the
-  // longest column there can be with every rank still readable.
-  readonly property real cardWidth: Math.max(36, Math.min((width - 2 * sideMargin) / 8.08, (height - 2 * topMargin) / 6.2))
+  // The number of columns the bottom row holds, which the two games differ on.
+  readonly property int columns: backend.pileCount - backend.tableauStart
+  // As wide as the bottom row's columns allow, and no taller than leaves room
+  // for the longest column there can be with every rank still readable. The
+  // first divisor is the columns plus the gaps between them; the second is the
+  // rows of cards the height must hold.
+  readonly property real cardWidth: Math.max(36, Math.min((width - 2 * sideMargin) / (columns + (columns - 1) * .18), (height - 2 * topMargin) / 6.2))
   readonly property real cardHeight: cardWidth * 1.39
   readonly property real unit: cardWidth / 112
   readonly property real gap: cardWidth * .18
-  readonly property real originX: (width - 7 * cardWidth - 6 * gap) / 2
+  // The columns sit centred, however many of them the game in play lays out.
+  readonly property real originX: (width - columns * cardWidth - (columns - 1) * gap) / 2
   readonly property real tableauTop: topMargin + cardHeight + cardHeight * .23
   readonly property real downStep: cardHeight * .1
   readonly property real upStep: cardHeight * .23
@@ -46,10 +52,18 @@ Item {
   Timer { id: settle; interval: 120; onTriggered: table.resizing = false }
 
   function pileX(pile) {
-    const column = pile === 0 ? 0 : pile === 1 ? 1 : pile < 6 ? pile + 1 : pile - 6
+    // Klondike: the stock takes column 0, the waste column 1, the foundations
+    // the next four, and the seven columns the bottom row.
+    if (backend.mode === 0) {
+      const column = pile === 0 ? 0 : pile === 1 ? 1 : pile < 6 ? pile + 1 : pile - 6
+      return originX + column * (cardWidth + gap)
+    }
+    // Spider: the stock takes column 0, the eight homes sit on columns 1 to 8,
+    // and the ten columns take the bottom row under them.
+    const column = pile === 0 ? 0 : pile < backend.tableauStart ? pile : pile - backend.tableauStart
     return originX + column * (cardWidth + gap)
   }
-  function pileY(pile) { return pile < 6 ? topMargin : tableauTop }
+  function pileY(pile) { return pile < backend.tableauStart ? topMargin : tableauTop }
   // A long column closes up so its last card stays on the table. Worked out
   // once per pile, not once per card.
   readonly property var squeezes: backend.piles.map((info) => {
@@ -58,17 +72,17 @@ Item {
     return wanted > room && wanted > 0 ? Math.max(.2, room / wanted) : 1
   })
   function squeeze(pile) { return squeezes[pile] }
-  function cardX(info) { return pileX(info.pile) + (info.pile === 1 ? info.fan * cardWidth * fanStep : 0) }
+  function cardX(info) { return pileX(info.pile) + (info.pile === backend.waste ? info.fan * cardWidth * fanStep : 0) }
   function cardY(info) {
-    if (info.pile < 6) return topMargin
+    if (info.pile < backend.tableauStart) return topMargin
     return tableauTop + (info.down * downStep + info.upBelow * upStep) * squeeze(info.pile)
   }
   // Where the cards from `index` to the top of `pile` lie, as one outline.
   function runRect(pile, index) {
     if (pile < 0) return Qt.rect(0, 0, 0, 0)
     const info = backend.piles[pile]
-    if (pile < 6) {
-      const fanned = pile === 1 ? Math.max(0, Math.min(info.count, 3) - 1) : 0
+    if (pile < backend.tableauStart) {
+      const fanned = pile === backend.waste ? Math.max(0, Math.min(info.count, 3) - 1) : 0
       return Qt.rect(pileX(pile) + fanned * cardWidth * fanStep, topMargin, cardWidth, cardHeight)
     }
     const place = (at) => (at < info.down ? at * downStep : info.down * downStep + (at - info.down) * upStep) * squeeze(pile)
@@ -76,14 +90,19 @@ Item {
     return Qt.rect(pileX(pile), tableauTop + place(first), cardWidth, place(Math.max(first, info.count - 1)) - place(first) + cardHeight)
   }
   function draggable(pile, index, faceUp) {
-    return faceUp && pile > 0 && !backend.won && (pile >= 6 || index === backend.piles[pile].count - 1)
+    return faceUp && pile > 0 && !backend.won && (pile >= backend.tableauStart || index === backend.piles[pile].count - 1)
   }
   function endDrag(item) {
     const centreX = item.x + cardWidth / 2
     const centreY = item.y + cardHeight / 2
-    const first = centreY < tableauTop - cardHeight * .12 ? 2 : 6
+    // Above the tableau a run is offered to the home piles, which start after
+    // the stock: the foundations for Klondike, the finished-run piles for
+    // Spider. Below it is offered to the columns.
+    const home = centreY < tableauTop - cardHeight * .12
+    const first = home ? (backend.mode === 0 ? 2 : 1) : backend.tableauStart
+    const last = home ? backend.tableauStart - 1 : backend.pileCount - 1
     let nearest = -1
-    for (let pile = first; pile < (first === 2 ? 6 : 13); ++pile)
+    for (let pile = first; pile <= last; ++pile)
       if (nearest < 0 || Math.abs(pileX(pile) + cardWidth / 2 - centreX) < Math.abs(pileX(nearest) + cardWidth / 2 - centreX)) nearest = pile
     const fromPile = dragPile, fromIndex = dragIndex
     // Animations come back on first, so the cards glide from where they were let go.
@@ -118,30 +137,67 @@ Item {
 
   function topIndex(pile) { return backend.piles[pile].count - 1 }
   function clampCursor() {
+    // The cursor outlives a game switch, so it is brought back onto the
+    // table before anything reads where it points.
+    cursorPile = Math.max(0, Math.min(backend.pileCount - 1, cursorPile))
     const info = backend.piles[cursorPile]
     if (info.count === 0) cursorIndex = -1
-    else if (cursorPile < 6) cursorIndex = info.count - 1
+    // On a top-row pile only the last card can be marked; in a column, the
+    // first face-up one or later.
+    else if (cursorPile < backend.tableauStart) cursorIndex = info.count - 1
     else cursorIndex = Math.max(info.down, Math.min(info.count - 1, cursorIndex < 0 ? info.count - 1 : cursorIndex))
   }
   function navigate(dx, dy) {
     keyboard = true
-    if (dx !== 0) {
-      const first = cursorPile < 6 ? 0 : 6, last = cursorPile < 6 ? 5 : 12
-      cursorPile = Math.max(first, Math.min(last, cursorPile + dx))
-      cursorIndex = topIndex(cursorPile)
-    } else if (dy < 0) {
-      if (cursorPile >= 6 && cursorIndex > backend.piles[cursorPile].down) {
-        --cursorIndex
-      } else if (cursorPile >= 6) {
-        const column = cursorPile - 6
-        cursorPile = column === 0 ? 0 : column < 3 ? 1 : column - 1
+    clampCursor()
+    if (backend.mode === 0) {
+      // Klondike's two rows: the stock, waste and foundations on top, the
+      // seven columns below. Walking off a row stops at its end.
+      if (dx !== 0) {
+        const first = cursorPile < 6 ? 0 : 6, last = cursorPile < 6 ? 5 : 12
+        cursorPile = Math.max(first, Math.min(last, cursorPile + dx))
         cursorIndex = topIndex(cursorPile)
+      } else if (dy < 0) {
+        if (cursorPile >= 6 && cursorIndex > backend.piles[cursorPile].down) {
+          --cursorIndex
+        } else if (cursorPile >= 6) {
+          const column = cursorPile - 6
+          cursorPile = column === 0 ? 0 : column < 3 ? 1 : column - 1
+          cursorIndex = topIndex(cursorPile)
+        }
+      } else if (cursorPile < 6) {
+        cursorPile = cursorPile === 0 ? 6 : cursorPile === 1 ? 7 : cursorPile + 7
+        cursorIndex = topIndex(cursorPile)
+      } else if (cursorIndex < topIndex(cursorPile)) {
+        ++cursorIndex
       }
-    } else if (cursorPile < 6) {
-      cursorPile = cursorPile === 0 ? 6 : cursorPile === 1 ? 7 : cursorPile + 7
-      cursorIndex = topIndex(cursorPile)
-    } else if (cursorIndex < topIndex(cursorPile)) {
-      ++cursorIndex
+    } else {
+      // Spider's two rows: the stock and the eight homes on top, the ten
+      // columns below. Walking off a row stops at its end.
+      if (dx !== 0) {
+        const first = cursorPile < backend.tableauStart ? 0 : backend.tableauStart
+        const last = cursorPile < backend.tableauStart ? backend.tableauStart - 1 : backend.pileCount - 1
+        cursorPile = Math.max(first, Math.min(last, cursorPile + dx))
+        cursorIndex = topIndex(cursorPile)
+      } else if (dy < 0) {
+        if (cursorPile >= backend.tableauStart && cursorIndex > backend.piles[cursorPile].down) {
+          --cursorIndex
+        } else if (cursorPile >= backend.tableauStart) {
+          // Up from a column goes to the top-row pile over it: the stock for
+          // column 0, the home sitting on that column for the rest, and for
+          // the tenth column, which has no home of its own, the home beside it.
+          const column = cursorPile - backend.tableauStart
+          cursorPile = column === 0 ? 0 : Math.min(column, backend.tableauStart - 1)
+          cursorIndex = topIndex(cursorPile)
+        }
+      } else if (cursorPile < backend.tableauStart) {
+        // Down from the stock goes to the first column; from a home, to the
+        // column under it.
+        cursorPile = cursorPile === 0 ? backend.tableauStart : backend.tableauStart + cursorPile
+        cursorIndex = topIndex(cursorPile)
+      } else if (cursorIndex < topIndex(cursorPile)) {
+        ++cursorIndex
+      }
     }
     clampCursor()
   }
@@ -198,7 +254,7 @@ Item {
   }
 
   Repeater {
-    model: 13
+    model: backend.pileCount
     Rectangle {
       id: slot
       required property int index
@@ -212,9 +268,10 @@ Item {
       color: table.look.slotFill
       border.color: table.look.slot
       border.width: table.look.slotWidth
-      // Each foundation shows the suit it collects.
+      // Each Klondike foundation shows the suit it collects; a Spider home
+      // may end in any suit, so it shows nothing.
       Suit {
-        visible: slot.index >= 2 && slot.index < 6
+        visible: backend.mode === 0 && slot.index >= 2 && slot.index < 6
         anchors.centerIn: parent
         suit: slot.index >= 2 && slot.index < 6 ? slot.index - 2 : 0
         color: table.look.mark
@@ -259,7 +316,7 @@ Item {
   }
 
   Repeater {
-    model: 52
+    model: backend.cardsTotal
     PlayingCard {
       id: item
       required property int index
@@ -271,6 +328,9 @@ Item {
       objectName: "card-" + index
       cardId: index
       faceUp: info.up
+      // The table passes the suit along, since in a one- or two-suit deal the
+      // id alone names the wrong one.
+      suit: info.suit
       look: table.look
       unit: table.unit
       motion: table.animate

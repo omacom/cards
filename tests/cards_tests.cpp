@@ -15,6 +15,8 @@
 
 #include "backend.h"
 #include <QJsonArray>
+#include "klondike.h"
+#include "spider.h"
 #include "theme.h"
 #include "translator.h"
 
@@ -152,9 +154,9 @@ QMap<QString, bool> translatables(const QString &folder, QStringList *problems) 
 using namespace Klondike;
 
 // Every pile, card by card, with the hidden ones in lower case.
-QString layout(const Game &game) {
+QString layout(const Solitaire::Game &game) {
     QString text;
-    for (int pile = 0; pile < Piles; ++pile) {
+    for (int pile = 0; pile < game.pileCount(); ++pile) {
         for (const Card &card : game.pile(pile)) text += QString::number(card.id) + (card.up ? "U " : "d ");
         text += "| ";
     }
@@ -253,6 +255,63 @@ QQuickItem *findItem(QQuickItem *root, const QString &name) {
     for (QQuickItem *child : root->childItems())
         if (QQuickItem *found = findItem(child, name)) return found;
     return nullptr;
+}
+
+// The move a plain driver would make on a Spider table: the largest run that
+// can leave a face-down card under itself goes onto a card one rank higher,
+// and once the stock is out any run is walked on, a move never going straight
+// back to where it just came from. True with the move in `from`, `index` and
+// `to`; false when nothing can be played and the stock should deal a row.
+bool spiderChoice(const Solitaire::Game &game, int *from, int *index, int *to) {
+    int bestScore = 0;
+    *from = *index = *to = -1;
+    const Solitaire::Move last = game.moves().empty() ? Solitaire::Move{} : game.moves().back();
+    const bool endgame = game.pile(Solitaire::Stock).empty();
+    for (int source = game.tableauStart(); source < game.pileCount(); ++source) {
+        const auto &pile = game.pile(source);
+        for (int at = int(pile.size()) - 1; at >= 0; --at) {
+            if (!pile[at].up) break;
+            // a run is picked up from its head, so only heads are worth trying
+            if (at > 0 && pile[at - 1].up && pile[at - 1].suit() == pile[at].suit()
+                && pile[at - 1].rank() == pile[at].rank() + 1)
+                continue;
+            for (int destination = game.tableauStart(); destination < game.pileCount(); ++destination) {
+                if (destination == source || !game.canMove(source, at, destination)) continue;
+                const auto &target = game.pile(destination);
+                if (source == last.to && destination == last.from) continue;
+                // while the stock lasts only moves that turn a card up count,
+                // and a whole column gains nothing parked in a hole
+                if (!endgame && (at == 0 || target.empty())) continue;
+                if (endgame && target.empty() && at == 0) continue;
+                const int score = int(pile.size()) - at + (!target.empty() && target.back().suit() == pile[at].suit() ? 1000 : 0);
+                if (score > bestScore) { bestScore = score; *from = source; *index = at; *to = destination; }
+            }
+        }
+    }
+    return *from >= 0;
+}
+
+// One step of plain driving: the choice above played through the game's own
+// hands, and the settling that hands a finished run its home after it. False
+// when the game has nothing left to offer.
+bool spiderStep(Spider::Game &game) {
+    int from, index, to;
+    if (spiderChoice(game, &from, &index, &to)) {
+        if (!game.play(from, to, int(game.pile(from).size()) - index)) return false;
+    } else if (!game.drawStock()) {
+        return false;
+    }
+    game.settle();
+    return true;
+}
+
+// Clicks a named game in the open new-game prompt and waits for it to be gone.
+bool dealFromPrompt(QQuickWindow *window, const QString &button) {
+    auto *prompt = window->findChild<QObject *>("newGame");
+    QQuickItem *choice = findItem(window->contentItem(), button);
+    if (!prompt || !choice) return false;
+    QTest::mouseClick(window, Qt::LeftButton, {}, choice->mapToScene(QPointF(choice->width() / 2, choice->height() / 2)).toPoint());
+    return QTest::qWaitFor([&] { return !prompt->property("visible").toBool(); }, 2000);
 }
 
 // The real window over a real backend that saves nowhere, with a theme and a
@@ -685,6 +744,249 @@ private slots:
         QVERIFY2(wins > 10 && stuck > 10, qPrintable(QString("%1 won, %2 stuck").arg(wins).arg(stuck)));
     }
 
+    void spiderDealsTheSameForASeed() {
+        const Spider::Game first(42), second(42), other(43);
+        QSet<int> seen;
+        bool differs = false;
+        for (int pile = 0; pile < Spider::Piles; ++pile) {
+            QCOMPARE(first.pile(pile).size(), second.pile(pile).size());
+            for (size_t i = 0; i < first.pile(pile).size(); ++i) {
+                QCOMPARE(first.pile(pile)[i].id, second.pile(pile)[i].id);
+                seen << first.pile(pile)[i].id;
+                differs = differs || other.pile(pile)[i].id != first.pile(pile)[i].id;
+            }
+        }
+        QCOMPARE(seen.size(), 104);
+        QVERIFY(differs);
+        QCOMPARE(int(first.pile(Spider::Stock).size()), 50);
+        // Ten columns: the first four hold six cards and the rest five, and
+        // each shows only its top.
+        for (int column = 0; column < 10; ++column) {
+            const auto &pile = first.pile(Spider::Tableau + column);
+            QCOMPARE(int(pile.size()), column < 4 ? 6 : 5);
+            for (int row = 0; row < int(pile.size()); ++row) QCOMPARE(pile[row].up, row == int(pile.size()) - 1);
+        }
+        QCOMPARE(first.home(), 0);
+        // The suit count is part of the deal: one and two suit games of a seed
+        // deal the same ranks, but the cards wear other suits.
+        const Spider::Game one(42, 1), two(42, 2);
+        QCOMPARE(one.suits(), 1);
+        QCOMPARE(two.suits(), 2);
+        bool suitsDiffer = false;
+        for (int pile = Spider::Tableau; pile < Spider::Piles; ++pile)
+            for (size_t i = 0; i < one.pile(pile).size(); ++i) {
+                QCOMPARE(one.pile(pile)[i].id, two.pile(pile)[i].id);
+                suitsDiffer = suitsDiffer || one.pile(pile)[i].suit() != two.pile(pile)[i].suit();
+            }
+        QVERIFY(suitsDiffer);
+    }
+
+    void spiderMovesFollowTheRules() {
+        for (quint32 seed = 1; seed <= 60; ++seed) {
+            const Spider::Game game(seed);
+            for (int from = Spider::Tableau; from < Spider::Piles; ++from) {
+                const int top = int(game.pile(from).size()) - 1;
+                const Card card = game.pile(from)[top];
+                // Hidden cards, the stock, the homes, and a pile onto itself never move.
+                QVERIFY(!game.canMove(from, top - 1, Spider::Tableau));
+                QVERIFY(!game.canMove(Spider::Stock, 0, Spider::Tableau));
+                QVERIFY(!game.canMove(from, top, from));
+                QVERIFY(!game.canMove(from, top, Spider::Stock));
+                QVERIFY(!game.canMove(Spider::Tableau, top, Spider::Home));
+                for (int to = Spider::Tableau; to < Spider::Piles; ++to) {
+                    if (to == from) continue;
+                    const Card onto = game.pile(to).back();
+                    // The color is beside the point: any suit one rank higher takes the card.
+                    QCOMPARE(game.canMove(from, top, to), onto.rank() == card.rank() + 1);
+                }
+            }
+        }
+        // A picked-up pair moves only when it is one suit in rank order. The
+        // row deals a second card up on every column, so pairs of every kind
+        // come up to be counted.
+        int twoSuits = 0, outOfOrder = 0, inOrder = 0;
+        for (quint32 seed = 1; seed <= 200; ++seed) {
+            Spider::Game game(seed);
+            QVERIFY(game.drawStock());
+            for (int from = Spider::Tableau; from < Spider::Piles; ++from) {
+                const auto &pile = game.pile(from);
+                const int under = int(pile.size()) - 2;
+                const Card bottom = pile[under], top = pile.back();
+                const int elsewhere = from == Spider::Tableau ? Spider::Tableau + 1 : Spider::Tableau;
+                if (bottom.suit() != top.suit()) {
+                    ++twoSuits;
+                    QVERIFY(!game.play(from, elsewhere, 2));
+                } else if (bottom.rank() != top.rank() + 1) {
+                    ++outOfOrder;
+                    QVERIFY(!game.play(from, elsewhere, 2));
+                } else {
+                    ++inOrder;
+                    for (int to = Spider::Tableau; to < Spider::Piles; ++to) {
+                        if (to == from) continue;
+                        const auto &target = game.pile(to);
+                        QCOMPARE(game.canMove(from, under, to), target.empty() || target.back().rank() == bottom.rank() + 1);
+                        if (!game.canMove(from, under, to)) continue;
+                        const QString before = layout(game);
+                        QVERIFY(game.play(from, to, 2));
+                        QCOMPARE(int(game.moves().back().count), 2);
+                        QVERIFY(game.undo());
+                        QCOMPARE(layout(game), before);
+                    }
+                }
+            }
+        }
+        QVERIFY2(twoSuits > 0 && outOfOrder > 0 && inOrder > 0,
+                 qPrintable(QString("%1 two suits, %2 out of order, %3 in order").arg(twoSuits).arg(outOfOrder).arg(inOrder)));
+    }
+
+    void spiderDrawsAndBlocksOnAnEmptyColumn() {
+        // Cards are played off one column until it is a hole, and the moves
+        // that got there are replayed with the checks made along the way.
+        std::vector<Move> played;
+        quint32 seed = 0;
+        for (quint32 candidate = 1; candidate <= 400 && !seed; ++candidate) {
+            played.clear();
+            Spider::Game game(candidate);
+            std::vector<int> sizes;
+            for (int column = 0; column < 10; ++column) sizes.push_back(int(game.pile(Spider::Tableau + column).size()));
+            if (!game.drawStock()) continue;
+            played.push_back({Solitaire::Stock, Spider::Tableau, Spider::Row, false});
+            bool emptied = false;
+            for (int step = 0; step < 300; ++step) {
+                const int target = Spider::Tableau + 9;
+                if (game.pile(target).empty()) { emptied = true; break; }
+                const int top = int(game.pile(target).size()) - 1;
+                const auto where = game.targets(target, top);
+                if (!where.empty()) {
+                    if (!game.play(target, where.front(), 1)) break;
+                    played.push_back({target, where.front(), 1, false});
+                } else if (game.drawStock()) {
+                    played.push_back({Solitaire::Stock, Spider::Tableau, Spider::Row, false});
+                } else {
+                    break;  // the stock ran out before the column emptied
+                }
+            }
+            // Stock enough must be left that refusing the next row is the
+            // hole's doing, not the stock's.
+            if (emptied && int(game.pile(Spider::Stock).size()) >= Spider::Row) seed = candidate;
+        }
+        QVERIFY(seed);
+        Spider::Game game(seed);
+        for (const Move &move : played)
+            QVERIFY2(game.play(move.from, move.to, move.count), qPrintable(QString("%1 -> %2").arg(move.from).arg(move.to)));
+        QCOMPARE(int(game.pile(Spider::Tableau + 9).size()), 0);
+        // The row dealt one card up to every column, ten off the stock at once.
+        Spider::Game fresh(seed);
+        std::vector<int> sizes;
+        for (int column = 0; column < 10; ++column) sizes.push_back(int(fresh.pile(Spider::Tableau + column).size()));
+        QVERIFY(fresh.drawStock());
+        QCOMPARE(int(fresh.pile(Spider::Stock).size()), 40);
+        for (int column = 0; column < 10; ++column) {
+            QCOMPARE(int(fresh.pile(Spider::Tableau + column).size()), sizes[column] + 1);
+            QVERIFY(fresh.pile(Spider::Tableau + column).back().up);
+        }
+        // A hole refuses the next row, and refusing it changes nothing.
+        const QString held = layout(game);
+        const int stock = int(game.pile(Spider::Stock).size());
+        QVERIFY(!game.drawStock());
+        QCOMPARE(layout(game), held);
+        QCOMPARE(int(game.pile(Spider::Stock).size()), stock);
+        // Taking the whole game back deals the same cards again.
+        while (game.undo()) { }
+        QCOMPARE(layout(game), layout(Spider::Game(seed)));
+    }
+
+    void spiderRemovesCompleteRuns() {
+        // One-suit deals build whole runs under plain driving (see spiderStep),
+        // and seed 1 completes its first with cards still under the run, so
+        // the leaving of it can be seen turning a card up.
+        Spider::Game game(1, 1);
+        QString before;
+        while (game.home() == 0 && !game.won()) {
+            before = layout(game);
+            QVERIFY(spiderStep(game));
+        }
+        QCOMPARE(game.home(), 13);
+        // The run left as a move of its own: thirteen cards to the first free home pile.
+        const Move left = game.moves().back();
+        QCOMPARE(left.count, 13);
+        QCOMPARE(left.to, Spider::Home);
+        QVERIFY(left.from >= Spider::Tableau && left.from < Spider::Tableau + 10);
+        // The card it uncovered was turned up with it.
+        QVERIFY(left.flip);
+        QVERIFY(!game.pile(left.from).empty());
+        QVERIFY(game.pile(left.from).back().up);
+        // One move before it put the run's last card in place.
+        const Move completed = game.moves()[int(game.moves().size()) - 2];
+        // Undo puts the run back on its column, whole and in order.
+        QVERIFY(game.undo());
+        QCOMPARE(game.home(), 0);
+        const auto &back = game.pile(left.from);
+        const int suit = back.back().suit();
+        for (int k = 0; k < 13; ++k) {
+            QCOMPARE(back[int(back.size()) - 13 + k].rank(), 12 - k);
+            QCOMPARE(back[int(back.size()) - 13 + k].suit(), suit);
+        }
+        QVERIFY(game.undo());
+        QCOMPARE(layout(game), before);
+        // Dealt the move that finished it again, the run leaves again, and the
+        // game carries on until a second run has left for the next home pile.
+        QVERIFY(game.play(completed.from, completed.to, completed.count));
+        game.settle();
+        QCOMPARE(game.home(), 13);
+        QVERIFY(game.pile(left.from).empty() || game.pile(left.from).back().up);
+        for (int step = 0; step < 20000 && game.home() < 26 && !game.won(); ++step) QVERIFY(spiderStep(game));
+        QCOMPARE(game.home(), 26);
+        const Move also = game.moves().back();
+        QCOMPARE(also.count, 13);
+        QCOMPARE(also.to, Spider::Home + 1);
+        QVERIFY(!game.won());
+    }
+
+    void spiderHintsPlayLegalGamesThatUndoCleanly() {
+        Backend backend(":memory:");
+        for (quint32 seed = 1; seed <= 20; ++seed) {
+            backend.newGame(seed, 1, 4);
+            QCOMPARE(backend.mode(), 1);
+            const QString start = layout(backend.game());
+            for (int step = 0; step < 700 && !backend.won(); ++step) {
+                const auto hint = backend.game().hint();
+                if (!hint) break;
+                if (hint->from == Solitaire::Stock || hint->to == Solitaire::Stock) backend.draw();
+                else QVERIFY2(backend.drop(hint->from, int(backend.game().pile(hint->from).size()) - hint->count, hint->to),
+                              qPrintable(QString("seed %1 step %2").arg(seed).arg(step)));
+            }
+            // Taking every move back deals the same cards again.
+            while (backend.canUndo()) backend.undo();
+            QCOMPARE(layout(backend.game()), start);
+        }
+    }
+
+    void spiderWins() {
+        // Seed 1 of the one-suit deals plays out to the end under plain
+        // driving, every move through the public play() or drawStock(): the
+        // eight runs leave one by one, and a win is only a win once all 104
+        // cards are home, so won() stays false at every count short of that.
+        Spider::Game game(1, 1);
+        for (int step = 0; step < 20000 && !game.won(); ++step) {
+            QVERIFY(spiderStep(game));
+            QVERIFY(!game.won() || game.home() == 104);
+        }
+        QVERIFY(game.won());
+        QCOMPARE(game.home(), 104);
+        QCOMPARE(int(game.pile(Spider::Stock).size()), 0);
+        // All eight runs sit on the eight home piles, king to ace.
+        for (int home = Spider::Home; home < Spider::Tableau; ++home) {
+            QCOMPARE(int(game.pile(home).size()), 13);
+            QCOMPARE(game.pile(home).front().rank(), 12);
+            QCOMPARE(game.pile(home).back().rank(), 0);
+        }
+        // Nothing left to hint at, and Spider has nothing that plays itself out.
+        QVERIFY(!game.hint());
+        QVERIFY(!game.finishable());
+        QVERIFY(!game.finishStep());
+    }
+
     void clicksPickUpAndPutDown() {
         Backend backend(":memory:");
         backend.newGame(transferSeed());
@@ -948,6 +1250,8 @@ private slots:
             QCOMPARE(readCatalog(dir.filePath("game.json"))["elapsed"].toInt(), 0);
         }
         QVERIFY(readCatalog(dir.filePath("game.json"))["elapsed"].toInt() >= 1);
+        // A Klondike save is the save there has always been, version and all.
+        QCOMPARE(readCatalog(dir.filePath("game.json"))["version"].toInt(), 1);
         Backend restored(dir.filePath("game.json"));
         QVERIFY(restored.elapsed() >= 1);
         QCOMPARE(layout(restored.game()), state);
@@ -956,6 +1260,72 @@ private slots:
         QVERIFY(restored.saveHealthy());
         restored.undo();
         QCOMPARE(restored.moves(), 1);
+    }
+
+    void spiderSavesAndResumes() {
+        QTemporaryDir dir;
+        QString state;
+        {
+            Backend game(dir.filePath("game.json"));
+            game.newGame(1, 1, 2);
+            QCOMPARE(game.mode(), 1);
+            QCOMPARE(game.suits(), 2);
+            QCOMPARE(game.cardsTotal(), 104);
+            QCOMPARE(game.pileCount(), int(Spider::Piles));
+            QCOMPARE(game.tableauStart(), int(Spider::Tableau));
+            QCOMPARE(game.waste(), -1);
+            // The opening hint of this deal is a move between columns, so the
+            // save carries a move and a row dealt on top of it.
+            const Move move = *game.game().hint();
+            QVERIFY(move.from >= Spider::Tableau && move.to >= Spider::Tableau);
+            QVERIFY(game.drop(move.from, int(game.game().pile(move.from).size()) - move.count, move.to));
+            game.draw();
+            state = layout(game.game());
+        }
+        Backend restored(dir.filePath("game.json"));
+        QVERIFY2(restored.error().isEmpty(), qPrintable(restored.error()));
+        QCOMPARE(restored.mode(), 1);
+        QCOMPARE(restored.suits(), 2);
+        QCOMPARE(restored.cardsTotal(), 104);
+        QCOMPARE(layout(restored.game()), state);
+        QCOMPARE(restored.moves(), 2);
+        QVERIFY(restored.saveHealthy());
+        // A spider save names its game and suits on a version of its own.
+        QCOMPARE(readCatalog(dir.filePath("game.json"))["version"].toInt(), 2);
+        // The won panel's Deal again asks for newGame() with nothing named,
+        // and the game in play is dealt again: spider, with its suit count.
+        restored.newGame();
+        QCOMPARE(restored.mode(), 1);
+        QCOMPARE(restored.suits(), 2);
+        QCOMPARE(restored.moves(), 0);
+        QCOMPARE(restored.stock(), 50);
+    }
+
+    void spiderSavesAfterARunLeaves() {
+        // A finished run is the whole point of Spider, so the save written
+        // just after one leaves has to read back as the table it was: the
+        // replay walks the recorded moves one by one, without settling them
+        // a second time, and lands exactly where the game stood.
+        QTemporaryDir dir;
+        QString state;
+        int played = 0;
+        {
+            Backend game(dir.filePath("game.json"));
+            game.newGame(1, 1, 1);
+            for (int step = 0; step < 5000 && game.home() < 13; ++step) {
+                int from, index, to;
+                if (spiderChoice(game.game(), &from, &index, &to)) QVERIFY(game.drop(from, index, to));
+                else game.draw();
+            }
+            QVERIFY(game.home() >= 13);
+            state = layout(game.game());
+            played = game.moves();
+        }
+        Backend restored(dir.filePath("game.json"));
+        QVERIFY2(restored.error().isEmpty(), qPrintable(restored.error()));
+        QCOMPARE(restored.mode(), 1);
+        QCOMPARE(layout(restored.game()), state);
+        QCOMPARE(restored.moves(), played);
     }
 
     void saveHasOneOwner() {
@@ -1038,6 +1408,51 @@ private slots:
         QCOMPARE(again.moves(), 100000);
     }
 
+    void oldKlondikeSavesStillOpen() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("game.json");
+        // A save from before there were two games names no game and no suits,
+        // and it opens as the Klondike it always was.
+        Game played(9);
+        QVERIFY(played.drawStock());
+        QVERIFY(played.drawStock());
+        QVERIFY(write(path, saved(played)));
+        {
+            Backend backend(path);
+            QVERIFY2(backend.error().isEmpty(), qPrintable(backend.error()));
+            QCOMPARE(backend.mode(), 0);
+            QCOMPARE(backend.suits(), 4);
+            QCOMPARE(backend.pileCount(), int(Piles));
+            QCOMPARE(backend.cardsTotal(), 52);
+            QCOMPARE(layout(backend.game()), layout(played));
+        }
+        // A save naming spider with a suit count the window never deals is
+        // damaged, and so is one whose version names no game at all: an older
+        // build would open either as the wrong game. The damaged-save path is
+        // the one it has always been: the file stays as it is until a new
+        // game is asked for.
+        for (const QByteArray &damaged : {QByteArray(R"({"version":1,"game":1,"suits":4,"seed":9,"moves":[]})"),
+                                          QByteArray(R"({"version":2,"game":1,"suits":3,"seed":9,"moves":[]})")}) {
+            QVERIFY(write(path, damaged));
+            Backend broken(path);
+            QVERIFY(!broken.error().isEmpty());
+            QVERIFY(!broken.saveHealthy());
+            QCOMPARE(broken.moves(), 0);
+            broken.setSeries(2);
+            broken.draw();
+            QCOMPARE(contents(path), damaged);
+            broken.dismissError();
+            QVERIFY(broken.error().isEmpty());
+            QVERIFY(!broken.saveHealthy());
+        }
+        Backend broken(path);
+        QVERIFY(!broken.saveHealthy());
+        broken.newGame(9);
+        QVERIFY(broken.saveHealthy());
+        QVERIFY(broken.error().isEmpty());
+        QCOMPARE(readCatalog(path)["seed"].toInt(), 9);
+    }
+
     void failedSavePreservesPreviousGame() {
         QTemporaryDir dir;
         const QString path = dir.filePath("save/game.json");
@@ -1096,6 +1511,7 @@ private slots:
         };
         QCOMPARE(run({"inspect", "--json"}), 0);
         auto state = QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+        QCOMPARE(state["game"].toString(), QString("klondike"));
         QCOMPARE(state["moves"].toInt(), 2);
         QCOMPARE(state["stock"].toInt(), 18);
         QCOMPARE(state["waste"].toArray().size(), 6);
@@ -1104,6 +1520,7 @@ private slots:
         QVERIFY(process.readAllStandardOutput().startsWith("Stock 18"));
         QCOMPARE(run({"deal", "42", "--json"}), 0);
         state = QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+        QCOMPARE(state["game"].toString(), QString("klondike"));
         QCOMPARE(state["stock"].toInt(), 24);
         QCOMPARE(state["tableau"].toArray().size(), 7);
         const Game dealt(42);
@@ -1112,6 +1529,31 @@ private slots:
         QCOMPARE(last[0].toString(), QString("??"));
         const Card shown = dealt.pile(Tableau + 6).back();
         QCOMPARE(last[6].toString(), QString(QStringList{"A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"}[shown.rank()]) + "SHDC"[shown.suit()]);
+        QCOMPARE(run({"deal", "spider", "7", "--json"}), 0);
+        state = QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+        QCOMPARE(state["game"].toString(), QString("spider"));
+        QCOMPARE(state["suits"].toInt(), 4);
+        QCOMPARE(state["stock"].toInt(), 50);
+        QCOMPARE(state["tableau"].toArray().size(), 10);
+        QCOMPARE(run({"deal", "spider", "7", "--suits", "2", "--json"}), 0);
+        state = QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+        QCOMPARE(state["suits"].toInt(), 2);
+        QCOMPARE(run({"deal", "9", "--json"}), 0);
+        state = QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+        QCOMPARE(state["game"].toString(), QString("klondike"));
+        QCOMPARE(state["tableau"].toArray().size(), 7);
+        // A spider save on disk is what inspect reports, too.
+        {
+            Backend game(dir.filePath("cards/game.json"));
+            game.newGame(7, 1, 2);
+            game.draw();
+        }
+        QCOMPARE(run({"inspect", "--json"}), 0);
+        state = QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+        QCOMPARE(state["game"].toString(), QString("spider"));
+        QCOMPARE(state["suits"].toInt(), 2);
+        QCOMPARE(state["stock"].toInt(), 40);
+        QCOMPARE(state["tableau"].toArray().size(), 10);
         QCOMPARE(run({"deal"}), 0);
         QCOMPARE(run({"deal", "0"}), 1);
         QVERIFY(!process.readAllStandardError().isEmpty());
@@ -1346,17 +1788,20 @@ private slots:
         // A healthy game shows no warning about saving.
         QVERIFY(!window->findChild<QQuickItem *>("unsavedMark")->isVisible());
 
-        // N deals a new game at once, and so does the footer's button.
+        // N opens the new-game prompt, and picking Klondike deals a fresh one.
         backend.draw();
         QString dealt = layout(backend.game());
         QTest::keyClick(window, Qt::Key_N);
+        QVERIFY(dealFromPrompt(window, "dealKlondike"));
         QVERIFY(layout(backend.game()) != dealt);
         QCOMPARE(backend.moves(), 0);
         backend.draw();
         dealt = layout(backend.game());
+        // The footer's button opens the same prompt before dealing.
         auto *deal = window->findChild<QQuickItem *>("newGameButton");
         QVERIFY(deal);
         QTest::mouseClick(window, Qt::LeftButton, {}, deal->mapToScene(QPointF(deal->width() / 2, deal->height() / 2)).toPoint());
+        QVERIFY(dealFromPrompt(window, "dealKlondike"));
         QVERIFY(layout(backend.game()) != dealt);
         QCOMPARE(backend.moves(), 0);
     }
@@ -1536,11 +1981,118 @@ private slots:
         QVERIFY(mark->isVisible());
         stage.backend.draw();
         QVERIFY(mark->isVisible());
-        // A new game replaces the damaged save, and the mark goes.
+        // A new game replaces the damaged save, and the mark goes: N opens
+        // the new-game prompt, and picking a game deals it.
         QTest::keyClick(stage.window, Qt::Key_N);
+        QVERIFY(dealFromPrompt(stage.window, "dealKlondike"));
         QVERIFY(stage.backend.saveHealthy());
         QTRY_VERIFY(!mark->isVisible());
         QCOMPARE(readCatalog(path)["version"].toInt(), 1);
+    }
+
+    void theNewGamePromptOffersTheGames() {
+        QTemporaryDir dir;
+        Stage stage(dir.path());
+        QVERIFY2(stage.window, qPrintable(stage.warnings.join('\n')));
+        Backend &backend = stage.backend;
+        QQuickWindow *window = stage.window;
+        const QString before = layout(backend.game());
+        // The footer's button opens the prompt, and nothing is dealt by opening it.
+        auto *button = window->findChild<QQuickItem *>("newGameButton");
+        QVERIFY(button);
+        QTest::mouseClick(window, Qt::LeftButton, {}, button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint());
+        auto *prompt = window->findChild<QObject *>("newGame");
+        QVERIFY(prompt);
+        QTRY_VERIFY(prompt->property("opened").toBool());
+        QCOMPARE(layout(backend.game()), before);
+        // Spider with two suits: 104 cards in 19 piles, every card with its place.
+        auto *spider2 = findItem(window->contentItem(), "dealSpider2");
+        QVERIFY(spider2);
+        QTest::mouseClick(window, Qt::LeftButton, {}, spider2->mapToScene(QPointF(spider2->width() / 2, spider2->height() / 2)).toPoint());
+        QTRY_VERIFY(!prompt->property("visible").toBool());
+        QCOMPARE(backend.mode(), 1);
+        QCOMPARE(backend.suits(), 2);
+        QCOMPARE(backend.cardsTotal(), 104);
+        QCOMPARE(backend.pileCount(), int(Spider::Piles));
+        QCOMPARE(backend.tableauStart(), int(Spider::Tableau));
+        QCOMPARE(backend.waste(), -1);
+        QCOMPARE(backend.stock(), 50);
+        QCOMPARE(backend.moves(), 0);
+        QCOMPARE(backend.home(), 0);
+        for (int pile = 0; pile < backend.pileCount(); ++pile) {
+            const auto &cards = backend.game().pile(pile);
+            for (int index = 0; index < int(cards.size()); ++index) {
+                const QVariantMap place = backend.cards()[cards[index].id].toMap();
+                QCOMPARE(place["pile"].toInt(), pile);
+                QCOMPARE(place["index"].toInt(), index);
+                QCOMPARE(place["up"].toBool(), cards[index].up);
+                QCOMPARE(place["suit"].toInt(), cards[index].suit());
+            }
+        }
+        const QString dealt = layout(backend.game());
+        // The N key opens the prompt too, and leaves the game as it was.
+        QTest::keyClick(window, Qt::Key_N);
+        QTRY_VERIFY(prompt->property("opened").toBool());
+        QCOMPARE(layout(backend.game()), dealt);
+        // Close puts the prompt away without dealing.
+        auto *box = prompt->property("footer").value<QQuickItem *>();
+        QVERIFY(box);
+        QQuickItem *close = nullptr;
+        for (QQuickItem *child : box->findChildren<QQuickItem *>())
+            if (child->property("text").toString() == QStringLiteral("Close")) close = child;
+        QVERIFY(close);
+        QTest::mouseClick(window, Qt::LeftButton, {}, close->mapToScene(QPointF(close->width() / 2, close->height() / 2)).toPoint());
+        QTRY_VERIFY(!prompt->property("visible").toBool());
+        QCOMPARE(layout(backend.game()), dealt);
+        QCOMPARE(backend.mode(), 1);
+        // The keyboard cursor outlives the game it was moving around, and is
+        // brought back onto the table the next time it moves.
+        auto *table = window->findChild<QQuickItem *>("table");
+        QVERIFY(table);
+        // Up from the tenth column, which has no home above it, rests on the
+        // home beside it rather than landing on the first column.
+        for (int step = 0; step < 9; ++step) QTest::keyClick(window, Qt::Key_Right);
+        QCOMPARE(table->property("cursorPile").toInt(), 18);
+        QTest::keyClick(window, Qt::Key_Up);
+        QCOMPARE(table->property("cursorPile").toInt(), 8);
+        QTest::keyClick(window, Qt::Key_Down);
+        QVERIFY(table->property("cursorPile").toInt() >= 13);
+        QTest::keyClick(window, Qt::Key_N);
+        QTRY_VERIFY(prompt->property("opened").toBool());
+        QVERIFY(dealFromPrompt(window, "dealKlondike"));
+        QTest::keyClick(window, Qt::Key_Down);
+        QCOMPARE(table->property("cursorPile").toInt(), 12);
+    }
+
+    void thePromptAnswersTheArrows() {
+        QTemporaryDir dir;
+        Stage stage(dir.path());
+        QVERIFY2(stage.window, qPrintable(stage.warnings.join('\n')));
+        Backend &backend = stage.backend;
+        QQuickWindow *window = stage.window;
+        auto *button = window->findChild<QQuickItem *>("newGameButton");
+        QVERIFY(button);
+        QTest::mouseClick(window, Qt::LeftButton, {}, button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint());
+        auto *prompt = window->findChild<QObject *>("newGame");
+        QVERIFY(prompt);
+        QTRY_VERIFY(prompt->property("opened").toBool());
+        // The prompt opens with the game in play under the arrows.
+        auto focused = [&] { return qobject_cast<QQuickItem *>(window->activeFocusItem()); };
+        QCOMPARE(focused()->objectName(), QStringLiteral("dealKlondike"));
+        // The arrows walk the choices round and round, either way.
+        QTest::keyClick(window, Qt::Key_Down);
+        QCOMPARE(focused()->objectName(), QStringLiteral("dealSpider1"));
+        QTest::keyClick(window, Qt::Key_Up);
+        QCOMPARE(focused()->objectName(), QStringLiteral("dealKlondike"));
+        QTest::keyClick(window, Qt::Key_Up);
+        QCOMPARE(focused()->objectName(), QStringLiteral("dealSpider4"));
+        // Enter deals the one the arrows rest on.
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!prompt->property("visible").toBool());
+        QCOMPARE(backend.mode(), 1);
+        QCOMPARE(backend.suits(), 4);
+        QCOMPARE(backend.cardsTotal(), 104);
+        QCOMPARE(backend.moves(), 0);
     }
 
     void windowMirrorsForArabic() {

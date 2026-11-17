@@ -1,6 +1,6 @@
 #pragma once
 
-#include "klondike.h"
+#include "solitaire.h"
 #include <QLockFile>
 #include <QObject>
 #include <QTimer>
@@ -22,6 +22,12 @@ class Backend : public QObject {
   Q_PROPERTY(bool stuck READ stuck NOTIFY marksChanged)
   Q_PROPERTY(int moves READ moves NOTIFY changed)
   Q_PROPERTY(int home READ home NOTIFY changed)
+  Q_PROPERTY(int mode READ mode NOTIFY changed)
+  Q_PROPERTY(int suits READ suits NOTIFY changed)
+  Q_PROPERTY(int pileCount READ pileCount NOTIFY changed)
+  Q_PROPERTY(int cardsTotal READ cardsTotal NOTIFY changed)
+  Q_PROPERTY(int tableauStart READ tableauStart NOTIFY changed)
+  Q_PROPERTY(int waste READ waste NOTIFY changed)
   Q_PROPERTY(int stock READ stock NOTIFY changed)
   Q_PROPERTY(bool won READ won NOTIFY changed)
   Q_PROPERTY(bool canUndo READ canUndo NOTIFY changed)
@@ -42,18 +48,25 @@ public:
   int hintIndex() const { return m_hintIndex; }
   int hintTo() const { return m_hintTo; }
   bool stuck() const { return m_stuck; }
-  int moves() const { return int(m_game.moves().size()); }
-  int home() const { return m_game.home(); }
-  int stock() const { return int(m_game.pile(Klondike::Stock).size()); }
-  bool won() const { return m_game.won(); }
-  bool canUndo() const { return !m_game.moves().empty(); }
+  int moves() const { return int(m_game->moves().size()); }
+  int home() const { return m_game->home(); }
+  // Which game is in play, 0 Klondike and 1 Spider, and what it deals.
+  int mode() const { return m_game->kind(); }
+  int suits() const { return m_game->suits(); }
+  int pileCount() const { return m_game->pileCount(); }
+  int cardsTotal() const { return m_game->cardsTotal(); }
+  int tableauStart() const { return m_game->tableauStart(); }
+  int waste() const { return m_game->wastePile(); }
+  int stock() const { return int(m_game->pile(Solitaire::Stock).size()); }
+  bool won() const { return m_game->won(); }
+  bool canUndo() const { return !m_game->moves().empty(); }
   int elapsed() const { return m_elapsed; }
   bool active() const { return m_active; }
   int series() const { return m_series; }
   bool saveHealthy() const { return ownsSave() && !m_saveBlocked && !m_saveFailed; }
   QString error() const { return m_error; }
   bool ownsSave() const { return m_savePath == ":memory:" || (m_saveLock && m_saveLock->isLocked()); }
-  const Klondike::Game &game() const { return m_game; }
+  const Solitaire::Game &game() const { return *m_game; }
 
   // A click: picks up the cards from `index` in `pile`, puts down what is
   // held when they may go there, and turns the stock.
@@ -66,8 +79,10 @@ public:
   Q_INVOKABLE void cancelSelection();
   Q_INVOKABLE void undo();
   Q_INVOKABLE void hint();
-  // Deals at once. A seed of 0 deals at random; the tests name theirs.
-  Q_INVOKABLE void newGame(quint32 seed = 0);
+  // Deals at once. A seed of 0 deals at random; the tests name theirs. The
+  // new-game dialog also names the game and how many suits; a negative game
+  // keeps the one in play, and its suit count.
+  Q_INVOKABLE void newGame(quint32 seed = 0, int game = -1, int suits = 4);
   Q_INVOKABLE void dismissError();
   void setActive(bool value);
   void setSeries(int value);
@@ -90,7 +105,7 @@ private:
   void finishStep();
   void save();
   void restore();
-  Klondike::Game m_game;
+  std::unique_ptr<Solitaire::Game> m_game;
   std::unique_ptr<QLockFile> m_saveLock;
   QVariantList m_cards, m_pileInfo, m_targets;
   int m_selectedPile = -1, m_selectedIndex = -1;
